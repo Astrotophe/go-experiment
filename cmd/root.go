@@ -5,16 +5,30 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
-	homedir "github.com/mitchellh/go-homedir"
+	"github.com/Shopify/sarama"
+	"github.com/mitchellh/go-homedir"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"os"
+	"os/signal"
 	"rocket-storemanager/internal/kafka"
+	"syscall"
 )
 
 var cfgFile string
+
+// Sarama configuration options
+var (
+	brokers  = "localhost:9092"
+	version  = "2.1.1"
+	group    = "rocket-storemanager"
+	topics   = "asset-events"
+	assignor = "range"
+	oldest   = true
+)
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
@@ -27,17 +41,39 @@ Cobra is a CLI library for Go that empowers applications.
 This application is a tool to generate the needed files
 to quickly create a Cobra application.`,
 
-		Run: func(cmd *cobra.Command, args []string) {
+	Run: func(cmd *cobra.Command, args []string) {
+		ctx, cancel := context.WithCancel(context.Background())
+		readChan := make(chan string, 30)
+		defer close(readChan)
+		doneChan := make(chan struct{})
+		defer close(doneChan)
 
-			channel := make(chan string, 10)
+		consumer := kafka.NewConsumer(kafkaConfig(), []string{brokers}, readChan)
 
-			defer close(channel)
+		for i := 0; i < 3; i++ {
+			go consumer.Consume(ctx, group, []string{topics}, doneChan)
+		}
 
-			for i:=0;i<3;i++ {go kafka.Consume(channel)}
-
-
-		},
-
+		// Listen system signal to stop goroutines by context
+		sigc := make(chan os.Signal, 1)
+		signal.Notify(sigc,
+			syscall.SIGHUP,
+			syscall.SIGINT,
+			syscall.SIGTERM,
+			syscall.SIGQUIT,
+		)
+		defer signal.Stop(sigc)
+		select {
+		case <-sigc:
+			log.Info("Signal caught canceling commands contexts")
+			cancel()
+			for i := 0; i < 3; i++ {
+				log.Print("ok")
+				<-doneChan
+			}
+			return
+		}
+	},
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
@@ -88,4 +124,33 @@ func initConfig() {
 	if err := viper.ReadInConfig(); err == nil {
 		fmt.Println("Using config file:", viper.ConfigFileUsed())
 	}
+}
+
+func kafkaConfig() *sarama.Config {
+	sarama.Logger = log.New()
+
+	version, err := sarama.ParseKafkaVersion(version)
+	if err != nil {
+		log.Panicf("Error parsing Kafka version: %v", err)
+	}
+
+	config := sarama.NewConfig()
+	config.Version = version
+
+	switch assignor {
+	case "sticky":
+		config.Consumer.Group.Rebalance.Strategy = sarama.BalanceStrategySticky
+	case "roundrobin":
+		config.Consumer.Group.Rebalance.Strategy = sarama.BalanceStrategyRoundRobin
+	case "range":
+		config.Consumer.Group.Rebalance.Strategy = sarama.BalanceStrategyRange
+	default:
+		log.Panicf("Unrecognized consumer group partition assignor: %s", assignor)
+	}
+
+	if oldest {
+		config.Consumer.Offsets.Initial = sarama.OffsetOldest
+	}
+
+	return config
 }
