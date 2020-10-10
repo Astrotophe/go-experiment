@@ -25,7 +25,7 @@ func NewConsumer(config *sarama.Config, brokers []string, readChan chan<- string
 	}
 }
 
-func (c *Consumer) Consume(ctx context.Context, group string, topics []string, doneChan chan<- struct{}) {
+func (c *Consumer) Consume(ctx context.Context, group string, topics []string, doneChan chan<- struct{}, handler sarama.ConsumerGroupHandler) {
 	log.Print("Starting a new consumer")
 
 	client, err := sarama.NewConsumerGroup(c.brokers, group, c.config)
@@ -42,31 +42,10 @@ func (c *Consumer) Consume(ctx context.Context, group string, topics []string, d
 			}
 			done = true
 		default:
-			if err := client.Consume(ctx, topics, c); err != nil {
+			if err := client.Consume(ctx, topics, handler); err != nil {
 				log.Fatalf("Error from consumer: %v", err)
 			}
 		}
 	}
 	doneChan <- struct{}{}
-}
-
-// Setup is run at the beginning of a new session, before ConsumeClaim
-func (c *Consumer) Setup(sarama.ConsumerGroupSession) error {
-	return nil
-}
-
-// Cleanup is run at the end of a session, once all ConsumeClaim goroutines have exited
-func (c *Consumer) Cleanup(sarama.ConsumerGroupSession) error {
-	return nil
-}
-
-// ConsumeClaim must start a consumer loop of ConsumerGroupClaim's Messages().
-func (c *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
-	for message := range claim.Messages() {
-		log.Printf("Message claimed: value = %s, timestamp = %v, topic = %s", string(message.Value), message.Timestamp, message.Topic)
-		c.readChan <- string(message.Value)
-		session.MarkMessage(message, "")
-	}
-
-	return nil
 }
